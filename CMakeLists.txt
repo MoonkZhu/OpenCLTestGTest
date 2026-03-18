@@ -16,6 +16,9 @@ file(GLOB TEST_SOURCES "src/*.cpp")
 # Define the test runner executable
 add_executable(cl_test_runner ${TEST_SOURCES})
 
+# Copy the kernel directory to the build directory so tests can find them easily
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/kernel DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
 # Include directory for our test base headers
 target_include_directories(cl_test_runner PRIVATE include)
 
