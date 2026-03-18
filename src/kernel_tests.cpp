@@ -1,7 +1,42 @@
 #include "cl_test_base.hpp"
 #include <vector>
 
-TEST_F(OpenCLTest, KernelExecution) {
+// Use TEST_P for parameterized testing
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+
+TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // Get the parameter injected for this test instance
+    size_t elements = GetParam();
+
+    cl_platform_id platform_id = nullptr;
+    cl_device_id device_id = nullptr;
+    cl_context context = nullptr;
+    cl_command_queue command_queue = nullptr;
+    cl_int err;
+
+    // 0. Initialize OpenCL
+    cl_uint num_platforms;
+    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
+    ASSERT_GT(num_platforms, 0) << "No OpenCL platforms available.";
+
+    cl_uint num_devices;
+    err = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, &num_devices);
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL devices.";
+    ASSERT_GT(num_devices, 0) << "No OpenCL devices available.";
+
+    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to create OpenCL context.";
+    ASSERT_NE(context, nullptr) << "OpenCL context is null.";
+
+#ifdef CL_VERSION_2_0
+    command_queue = clCreateCommandQueueWithProperties(context, device_id, nullptr, &err);
+#else
+    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
+#endif
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to create OpenCL command queue.";
+    ASSERT_NE(command_queue, nullptr) << "OpenCL command queue is null.";
+
     // 1. Load kernel source code
     std::string kernel_source;
     ASSERT_NO_THROW({
@@ -10,8 +45,6 @@ TEST_F(OpenCLTest, KernelExecution) {
 
     const char* source_cstr = kernel_source.c_str();
     size_t source_size = kernel_source.size();
-
-    cl_int err;
 
     // 2. Create OpenCL program
     cl_program program = clCreateProgramWithSource(context, 1, &source_cstr, &source_size, &err);
@@ -35,7 +68,6 @@ TEST_F(OpenCLTest, KernelExecution) {
     ASSERT_NE(kernel, nullptr) << "Kernel is null.";
 
     // 5. Setup data and buffers
-    const size_t elements = 1024;
     const size_t buffer_size = elements * sizeof(int);
 
     std::vector<int> hostA(elements);
@@ -86,4 +118,17 @@ TEST_F(OpenCLTest, KernelExecution) {
     if (bufResult) clReleaseMemObject(bufResult);
     if (kernel) clReleaseKernel(kernel);
     if (program) clReleaseProgram(program);
+    if (command_queue) clReleaseCommandQueue(command_queue);
+    if (context) clReleaseContext(context);
 }
+
+// Instantiate the parameterized test suite with different data sizes
+INSTANTIATE_TEST_SUITE_P(
+    DifferentSizes,
+    OpenCLParameterizedTest,
+    ::testing::Values(
+        10,       // Test with 10 elements
+        1024,     // Test with 1024 elements
+        1000000   // Test with 1,000,000 elements
+    )
+);

@@ -48,8 +48,11 @@ cmake --build .
 
 在输出的最后，GTest 会提供一个总结，说明有多少测试通过，有多少失败。
 
-## 如何添加并运行使用 Kernel 的测试用例
-得益于基础 fixture 和 CMake 配置，添加新的测试用例非常容易。项目中包含一个名为 `LoadKernelSource` 的辅助函数来帮助您加载 OpenCL Kernel 源码，并且 CMake 会自动将 `kernel` 文件夹拷贝到 build 目录。
+## 如何管理多目录和新增测试用例
+
+本项目在 CMake 配置中支持自动搜索 `src/` 下的子目录。如果您希望详细分类测试用例，您可以在 `src/` 下创建新的子文件夹。对于每一个包含了 `.cpp` 文件的子文件夹，CMake 都会为您自动生成一个名为 `cl_test_<子文件夹名>` 的可执行测试文件。这使得您的构建系统能自动适应项目的变化而无需修改 `CMakeLists.txt`。
+
+得益于基础 fixture 和 CMake 配置，添加新的测试用例非常容易。项目中包含一个名为 `LoadKernelSource` 的辅助函数来帮助您加载 OpenCL Kernel 源码，并且 CMake 会自动将 `kernel` 文件夹拷贝到 build 目录。您需要在自己的测试用例中自行初始化及清理 OpenCL 的上下文、队列等状态，以便进行更灵活的测试。
 
 以下是添加并运行 Kernel 的详细步骤（以向量相加为例）：
 
@@ -61,15 +64,39 @@ __kernel void simple_add(__global const int* a, __global const int* b, __global 
 }
 ```
 
-2. 在 `src/` 目录中创建一个新的测试源文件（例如 `src/kernel_tests.cpp`）。
-3. 包含基础夹具头文件：`#include "cl_test_base.hpp"`，并继承 `OpenCLTest` 来编写您的测试。在测试中，您可以直接使用 `platform_id`, `device_id`, `context` 和 `command_queue` 等变量。
+2. 在 `src/` 目录中（或者其下的某个新创建的子文件夹例如 `src/my_category/`）创建一个新的测试源文件。
+3. 包含基础夹具头文件：`#include "cl_test_base.hpp"`，并继承 `OpenCLTest` 来编写您的测试。在测试中，你需要手动初始化 OpenCL 状态并可以在执行之后手动清理。同时您可以使用从基类继承的 `LoadKernelSource()` 方法。
+
+如何使用 `TEST_P` (参数化测试) 注入不同的数据输入进行测试:
+
+使用 GTest 的参数化测试功能（`TEST_P` 和 `INSTANTIATE_TEST_SUITE_P`），你可以编写一次测试逻辑，然后注入多组不同大小或类型的数据进行运行，而无需编写重复代码。首先需要创建一个继承自你的基础类和 `::testing::WithParamInterface<T>` 的新类，其中 `T` 是你需要注入的数据类型（例如 `size_t` 表示数组大小）。
 
 示例:
 ```cpp
 #include "cl_test_base.hpp"
 #include <vector>
 
-TEST_F(OpenCLTest, KernelExecution) {
+// 继承 OpenCLTest 以及 WithParamInterface 来接收 size_t 类型的参数
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+
+TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // 获取当前测试实例被注入的参数（比如元素个数）
+    size_t elements = GetParam();
+
+    cl_platform_id platform_id = nullptr;
+    cl_device_id device_id = nullptr;
+    cl_context context = nullptr;
+    cl_command_queue command_queue = nullptr;
+    cl_int err;
+
+    // 0. Initialize OpenCL (Simplified for example)
+    cl_uint num_platforms;
+    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
+    clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, nullptr);
+    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
+    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
+
     // 1. 加载 Kernel 源码
     std::string kernel_source;
     ASSERT_NO_THROW({
@@ -78,8 +105,6 @@ TEST_F(OpenCLTest, KernelExecution) {
 
     const char* source_cstr = kernel_source.c_str();
     size_t source_size = kernel_source.size();
-
-    cl_int err;
 
     // 2. 创建 OpenCL program
     cl_program program = clCreateProgramWithSource(context, 1, &source_cstr, &source_size, &err);
@@ -93,8 +118,7 @@ TEST_F(OpenCLTest, KernelExecution) {
     cl_kernel kernel = clCreateKernel(program, "simple_add", &err);
     ASSERT_EQ(err, CL_SUCCESS) << "Failed to create kernel.";
 
-    // 5. 设置数据和 Buffer
-    const size_t elements = 1024;
+    // 5. 设置数据和 Buffer (使用注入的参数)
     const size_t buffer_size = elements * sizeof(int);
 
     std::vector<int> hostA(elements);
@@ -133,9 +157,24 @@ TEST_F(OpenCLTest, KernelExecution) {
     clReleaseMemObject(bufResult);
     clReleaseKernel(kernel);
     clReleaseProgram(program);
+
+    // Clean up OpenCL state
+    clReleaseCommandQueue(command_queue);
+    clReleaseContext(context);
 }
+
+// 实例化测试套件，并注入不同的数据大小
+INSTANTIATE_TEST_SUITE_P(
+    DifferentSizes,
+    OpenCLParameterizedTest,
+    ::testing::Values(
+        10,       // 使用 10 个元素进行测试
+        1024,     // 使用 1024 个元素进行测试
+        1000000   // 使用 1,000,000 个元素进行测试
+    )
+);
 ```
-4. 重新构建项目（在 `build/` 目录内运行 `cmake --build .`）。新的测试将被自动发现并运行！
+4. 重新构建项目（在 `build/` 目录内运行 `cmake --build .`）。新的参数化测试将被自动发现并针对每组输入数据运行一次！
 
 ---
 
@@ -189,8 +228,11 @@ When you run `./cl_test_runner`, GTest will output the results to the terminal.
 
 At the end of the output, GTest will provide a summary of how many tests passed and how many failed.
 
-## How to Add and Run a Kernel Test Case
-Thanks to the base fixture and CMake configuration, adding a new test case is extremely easy. The project includes a helper function `LoadKernelSource` to assist you in loading OpenCL Kernel source code, and CMake will automatically copy the `kernel` folder to the build directory.
+## How to Manage Multiple Directories and Add a Kernel Test Case
+
+This project's CMake configuration supports automatic discovery of subdirectories within `src/`. If you wish to organize your test cases into detailed categories, you can create new subfolders under `src/`. For each subfolder that contains `.cpp` files, CMake will automatically generate an executable test file named `cl_test_<subfoldername>`. This allows the build system to adapt to changes in your project structure without requiring modifications to `CMakeLists.txt`.
+
+Thanks to the base fixture and CMake configuration, adding a new test case is extremely easy. The project includes a helper function `LoadKernelSource` to assist you in loading OpenCL Kernel source code, and CMake will automatically copy the `kernel` folder to the build directory. You will need to initialize and clean up OpenCL state (like contexts and command queues) within your own test cases to allow for more flexible testing.
 
 Here is a step-by-step guide to adding and running a Kernel (using vector addition as an example):
 
@@ -202,15 +244,39 @@ __kernel void simple_add(__global const int* a, __global const int* b, __global 
 }
 ```
 
-2. Create a new test source file in the `src/` directory (e.g., `src/kernel_tests.cpp`).
-3. Include the base fixture header: `#include "cl_test_base.hpp"` and inherit from `OpenCLTest`. Inside the test, you can directly access variables like `platform_id`, `device_id`, `context`, and `command_queue`.
+2. Create a new test source file in the `src/` directory (or a newly created subfolder like `src/my_category/`).
+3. Include the base fixture header: `#include "cl_test_base.hpp"` and inherit from `OpenCLTest`. Inside the test, you need to manually initialize the OpenCL state and clean it up afterward. You can use the inherited `LoadKernelSource()` method.
+
+How to Use `TEST_P` (Parameterized Testing) to Inject Different Data Inputs:
+
+Using GTest's parameterized testing features (`TEST_P` and `INSTANTIATE_TEST_SUITE_P`), you can write your test logic once and then inject multiple sets of varying data (like different sizes or data types) without duplicating code. First, create a new class that inherits from your base test fixture and `::testing::WithParamInterface<T>`, where `T` is the type of the injected data (e.g., `size_t` for an array size).
 
 Example:
 ```cpp
 #include "cl_test_base.hpp"
 #include <vector>
 
-TEST_F(OpenCLTest, KernelExecution) {
+// Inherit from OpenCLTest and WithParamInterface to receive size_t type parameters
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+
+TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // Get the parameter injected for this test instance (e.g., number of elements)
+    size_t elements = GetParam();
+
+    cl_platform_id platform_id = nullptr;
+    cl_device_id device_id = nullptr;
+    cl_context context = nullptr;
+    cl_command_queue command_queue = nullptr;
+    cl_int err;
+
+    // 0. Initialize OpenCL (Simplified for example)
+    cl_uint num_platforms;
+    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
+    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
+    clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, nullptr);
+    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
+    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
+
     // 1. Load Kernel source
     std::string kernel_source;
     ASSERT_NO_THROW({
@@ -219,8 +285,6 @@ TEST_F(OpenCLTest, KernelExecution) {
 
     const char* source_cstr = kernel_source.c_str();
     size_t source_size = kernel_source.size();
-
-    cl_int err;
 
     // 2. Create OpenCL program
     cl_program program = clCreateProgramWithSource(context, 1, &source_cstr, &source_size, &err);
@@ -234,8 +298,7 @@ TEST_F(OpenCLTest, KernelExecution) {
     cl_kernel kernel = clCreateKernel(program, "simple_add", &err);
     ASSERT_EQ(err, CL_SUCCESS) << "Failed to create kernel.";
 
-    // 5. Setup data and Buffers
-    const size_t elements = 1024;
+    // 5. Setup data and Buffers (Using the injected parameter)
     const size_t buffer_size = elements * sizeof(int);
 
     std::vector<int> hostA(elements);
@@ -274,6 +337,21 @@ TEST_F(OpenCLTest, KernelExecution) {
     clReleaseMemObject(bufResult);
     clReleaseKernel(kernel);
     clReleaseProgram(program);
+
+    // Clean up OpenCL state
+    clReleaseCommandQueue(command_queue);
+    clReleaseContext(context);
 }
+
+// Instantiate the parameterized test suite with different data sizes
+INSTANTIATE_TEST_SUITE_P(
+    DifferentSizes,
+    OpenCLParameterizedTest,
+    ::testing::Values(
+        10,       // Test with 10 elements
+        1024,     // Test with 1024 elements
+        1000000   // Test with 1,000,000 elements
+    )
+);
 ```
-4. Rebuild the project (`cmake --build .` inside the `build/` directory). The new test will be discovered and run automatically!
+4. Rebuild the project (`cmake --build .` inside the `build/` directory). The new parameterized tests will be automatically discovered and run once for each set of input data!
