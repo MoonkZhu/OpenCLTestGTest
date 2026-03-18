@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/cl_test_runner.dir/src/buffer_tests.cpp.o -o cl_test_runner  lib/libgtest_main.a /usr/lib/x86_64-linux-gnu/libOpenCL.so lib/libgtest.a

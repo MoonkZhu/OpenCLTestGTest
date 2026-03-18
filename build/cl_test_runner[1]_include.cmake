@@ -1,0 +1,5 @@
+if(EXISTS "/app/build/cl_test_runner[1]_tests.cmake")
+  include("/app/build/cl_test_runner[1]_tests.cmake")
+else()
+  add_test(cl_test_runner_NOT_BUILT cl_test_runner_NOT_BUILT)
+endif()
