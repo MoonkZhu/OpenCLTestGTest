@@ -9,6 +9,11 @@
 #include <CL/cl.h>
 #endif
 
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+
 class OpenCLTest : public ::testing::Test {
 protected:
     cl_platform_id platform_id = nullptr;
@@ -55,6 +60,16 @@ protected:
             clReleaseContext(context);
             context = nullptr;
         }
+    }
+
+    std::string LoadKernelSource(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open kernel file: " + filename);
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        return buffer.str();
     }
 };
 
