@@ -69,6 +69,20 @@ __kernel void simple_add(__global const int* a, __global const int* b, __global 
 
 如何使用 `TEST_P` (参数化测试) 注入不同的数据输入进行测试:
 
+### 混合初始化机制与 CPU Golden Data 校验
+
+本项目支持两种测试初始化模式（混合模式）：
+
+- **常规模式 (Normal Mode)**: 如果你不需要特殊的 OpenCL 初始化配置，只需在测试的开始调用 `InitStandard()`。该方法会自动找到平台、设备，并创建 `context` 和 `command_queue`，在测试结束后也会自动清理，无需手动编写这些模板代码。
+- **高级模式 (Advanced Mode)**: 如果你需要测试特殊属性（例如特殊的 `cl_mem_flags`，或者只测试特定类型的设备），你可以跳过 `InitStandard()`，在测试用例中自行调用 OpenCL C API 进行自定义初始化。如果你手动修改了 `context` 或 `command_queue` 这两个被保护的成员变量，基类的 `TearDown()` 依然会安全地为你释放它们。
+
+同时，为了保证数据的准确性，推荐重写基类的 `CpuReference()` 钩子来生成或者加载 CPU 的 Golden Data（标准参考数据），并在最后使用 `VerifyResults()` 方法进行比对。`VerifyResults()` 自动处理了浮点数（使用容差比较）、整数及原始二进制内存的比对。
+
+#### 准备 Golden Data 的外部方式
+如果你不希望在 C++ 里手写 CPU 逻辑，你也可以通过 Python 脚本运行算法，将生成的 Golden 结果序列化成 `.bin` 二进制文件放入 `data/` 目录。在你的测试用例中读取这个 `.bin` 文件并传递给 `VerifyResults(void* actual, void* golden, size_t size)` 进行验证。
+
+以下展示了如何使用参数化测试，结合 **常规模式** 及 **CPU 黄金数据** 验证：
+
 使用 GTest 的参数化测试功能（`TEST_P` 和 `INSTANTIATE_TEST_SUITE_P`），你可以编写一次测试逻辑，然后注入多组不同大小或类型的数据进行运行，而无需编写重复代码。首先需要创建一个继承自你的基础类和 `::testing::WithParamInterface<T>` 的新类，其中 `T` 是你需要注入的数据类型（例如 `size_t` 表示数组大小）。
 
 示例:
@@ -77,25 +91,30 @@ __kernel void simple_add(__global const int* a, __global const int* b, __global 
 #include <vector>
 
 // 继承 OpenCLTest 以及 WithParamInterface 来接收 size_t 类型的参数
-class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {
+protected:
+    std::vector<int> goldenData;
+
+    // 重写 CpuReference 以生成参考基准数据
+    void CpuReference() override {
+        size_t elements = GetParam();
+        goldenData.resize(elements);
+        for (size_t i = 0; i < elements; ++i) {
+            goldenData[i] = i + (i * 2);
+        }
+    }
+};
 
 TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // 0. 初始化 OpenCL (常规模式：使用预置的快速初始化)
+    InitStandard();
+
+    // 运行 CPU 参考逻辑，准备 Golden Data
+    CpuReference();
+
     // 获取当前测试实例被注入的参数（比如元素个数）
     size_t elements = GetParam();
-
-    cl_platform_id platform_id = nullptr;
-    cl_device_id device_id = nullptr;
-    cl_context context = nullptr;
-    cl_command_queue command_queue = nullptr;
     cl_int err;
-
-    // 0. Initialize OpenCL (Simplified for example)
-    cl_uint num_platforms;
-    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
-    clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, nullptr);
-    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
-    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
 
     // 1. 加载 Kernel 源码
     std::string kernel_source;
@@ -146,21 +165,15 @@ TEST_P(OpenCLParameterizedTest, KernelExecution) {
     // 8. 读取结果
     clEnqueueReadBuffer(command_queue, bufResult, CL_TRUE, 0, buffer_size, hostResult.data(), 0, nullptr, nullptr);
 
-    // 9. 验证结果
-    for (size_t i = 0; i < elements; ++i) {
-        ASSERT_EQ(hostResult[i], hostA[i] + hostB[i]) << "Data mismatch at index " << i;
-    }
+    // 9. 验证结果 (使用内置的比较机制与 Golden Data 对比)
+    VerifyResults(hostResult, goldenData);
 
-    // 10. 清理资源 (Buffer, Kernel, Program...)
+    // 10. 清理资源 (Buffer, Kernel, Program... 注意：context 和 queue 会由 TearDown 自动清理)
     clReleaseMemObject(bufA);
     clReleaseMemObject(bufB);
     clReleaseMemObject(bufResult);
     clReleaseKernel(kernel);
     clReleaseProgram(program);
-
-    // Clean up OpenCL state
-    clReleaseCommandQueue(command_queue);
-    clReleaseContext(context);
 }
 
 // 实例化测试套件，并注入不同的数据大小
@@ -249,6 +262,20 @@ __kernel void simple_add(__global const int* a, __global const int* b, __global 
 
 How to Use `TEST_P` (Parameterized Testing) to Inject Different Data Inputs:
 
+### Hybrid Initialization Mechanism & CPU Golden Data Verification
+
+This project supports a hybrid test initialization model:
+
+- **Normal Mode**: If you don't need any special OpenCL configuration, simply call `InitStandard()` at the very beginning of your test. This will automatically fetch the platform and device, create the `context` and `command_queue`, and automatically clean them up when the test finishes.
+- **Advanced Mode**: If you need to test special properties (e.g., custom `cl_mem_flags`, or querying for a specific device type), you can skip `InitStandard()`. You are free to initialize the OpenCL runtime manually using standard C APIs. As long as you assign your handles to the protected members `context` and `command_queue`, the base class's `TearDown()` hook will safely release them for you.
+
+Additionally, to ensure the accuracy of your logic, you should override the base class's `CpuReference()` hook to generate or load CPU Golden Data (reference data). Once generated, you can easily validate OpenCL output arrays against your CPU baseline using `VerifyResults()`. `VerifyResults` automatically handles float/double comparisons (with tolerances), generic integral types, and raw binary memory.
+
+#### External Golden Data Preparation
+If you'd rather not implement the CPU logic in C++, you can run an algorithm in Python, serialize the expected binary output to a `.bin` file, and place it in a `data/` directory. Inside your test case, read this `.bin` file and pass its buffer to `VerifyResults(void* actual, void* golden, size_t size)` for a direct memory comparison.
+
+Below is an example showing how to use parameterized testing alongside **Normal Mode** initialization and **CPU Golden Data** generation:
+
 Using GTest's parameterized testing features (`TEST_P` and `INSTANTIATE_TEST_SUITE_P`), you can write your test logic once and then inject multiple sets of varying data (like different sizes or data types) without duplicating code. First, create a new class that inherits from your base test fixture and `::testing::WithParamInterface<T>`, where `T` is the type of the injected data (e.g., `size_t` for an array size).
 
 Example:
@@ -257,25 +284,30 @@ Example:
 #include <vector>
 
 // Inherit from OpenCLTest and WithParamInterface to receive size_t type parameters
-class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {
+protected:
+    std::vector<int> goldenData;
+
+    // Override CpuReference to generate the baseline data
+    void CpuReference() override {
+        size_t elements = GetParam();
+        goldenData.resize(elements);
+        for (size_t i = 0; i < elements; ++i) {
+            goldenData[i] = i + (i * 2);
+        }
+    }
+};
 
 TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // 0. Initialize OpenCL (Normal Mode: quick and easy standardized setup)
+    InitStandard();
+
+    // Prepare CPU Golden Data reference
+    CpuReference();
+
     // Get the parameter injected for this test instance (e.g., number of elements)
     size_t elements = GetParam();
-
-    cl_platform_id platform_id = nullptr;
-    cl_device_id device_id = nullptr;
-    cl_context context = nullptr;
-    cl_command_queue command_queue = nullptr;
     cl_int err;
-
-    // 0. Initialize OpenCL (Simplified for example)
-    cl_uint num_platforms;
-    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
-    clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, nullptr);
-    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
-    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
 
     // 1. Load Kernel source
     std::string kernel_source;
@@ -326,21 +358,15 @@ TEST_P(OpenCLParameterizedTest, KernelExecution) {
     // 8. Read back results
     clEnqueueReadBuffer(command_queue, bufResult, CL_TRUE, 0, buffer_size, hostResult.data(), 0, nullptr, nullptr);
 
-    // 9. Verify results
-    for (size_t i = 0; i < elements; ++i) {
-        ASSERT_EQ(hostResult[i], hostA[i] + hostB[i]) << "Data mismatch at index " << i;
-    }
+    // 9. Verify results (using built-in comparison against Golden Data)
+    VerifyResults(hostResult, goldenData);
 
-    // 10. Cleanup resources (Buffer, Kernel, Program...)
+    // 10. Cleanup resources (Buffer, Kernel, Program... Note: context and queue are handled automatically)
     clReleaseMemObject(bufA);
     clReleaseMemObject(bufB);
     clReleaseMemObject(bufResult);
     clReleaseKernel(kernel);
     clReleaseProgram(program);
-
-    // Clean up OpenCL state
-    clReleaseCommandQueue(command_queue);
-    clReleaseContext(context);
 }
 
 // Instantiate the parameterized test suite with different data sizes

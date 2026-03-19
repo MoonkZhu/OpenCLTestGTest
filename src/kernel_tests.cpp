@@ -2,40 +2,32 @@
 #include <vector>
 
 // Use TEST_P for parameterized testing
-class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {};
+class OpenCLParameterizedTest : public OpenCLTest, public ::testing::WithParamInterface<size_t> {
+protected:
+    std::vector<int> goldenData;
+
+    // We can use CpuReference to generate our golden data baseline
+    void CpuReference() override {
+        size_t elements = GetParam();
+        goldenData.resize(elements);
+        for (size_t i = 0; i < elements; ++i) {
+            int a = i;
+            int b = i * 2;
+            goldenData[i] = a + b;
+        }
+    }
+};
 
 TEST_P(OpenCLParameterizedTest, KernelExecution) {
+    // 0. Initialize OpenCL (Hybrid Approach: use the new standard initialization)
+    InitStandard();
+
+    // Generate Golden Data CPU Reference
+    CpuReference();
+
     // Get the parameter injected for this test instance
     size_t elements = GetParam();
-
-    cl_platform_id platform_id = nullptr;
-    cl_device_id device_id = nullptr;
-    cl_context context = nullptr;
-    cl_command_queue command_queue = nullptr;
     cl_int err;
-
-    // 0. Initialize OpenCL
-    cl_uint num_platforms;
-    err = clGetPlatformIDs(1, &platform_id, &num_platforms);
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL platforms.";
-    ASSERT_GT(num_platforms, 0) << "No OpenCL platforms available.";
-
-    cl_uint num_devices;
-    err = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_ALL, 1, &device_id, &num_devices);
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to find any OpenCL devices.";
-    ASSERT_GT(num_devices, 0) << "No OpenCL devices available.";
-
-    context = clCreateContext(nullptr, 1, &device_id, nullptr, nullptr, &err);
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to create OpenCL context.";
-    ASSERT_NE(context, nullptr) << "OpenCL context is null.";
-
-#ifdef CL_VERSION_2_0
-    command_queue = clCreateCommandQueueWithProperties(context, device_id, nullptr, &err);
-#else
-    command_queue = clCreateCommandQueue(context, device_id, 0, &err);
-#endif
-    ASSERT_EQ(err, CL_SUCCESS) << "Failed to create OpenCL command queue.";
-    ASSERT_NE(command_queue, nullptr) << "OpenCL command queue is null.";
 
     // 1. Load kernel source code
     std::string kernel_source;
@@ -107,19 +99,15 @@ TEST_P(OpenCLParameterizedTest, KernelExecution) {
     err = clEnqueueReadBuffer(command_queue, bufResult, CL_TRUE, 0, buffer_size, hostResult.data(), 0, nullptr, nullptr);
     ASSERT_EQ(err, CL_SUCCESS) << "Failed to read buffer.";
 
-    // 9. Verify the results
-    for (size_t i = 0; i < elements; ++i) {
-        ASSERT_EQ(hostResult[i], hostA[i] + hostB[i]) << "Data mismatch at index " << i;
-    }
+    // 9. Verify the results using the new VerifyResults method against CPU reference
+    VerifyResults(hostResult, goldenData);
 
-    // 10. Cleanup
+    // 10. Cleanup (context and queue are handled by TearDown in base class)
     if (bufA) clReleaseMemObject(bufA);
     if (bufB) clReleaseMemObject(bufB);
     if (bufResult) clReleaseMemObject(bufResult);
     if (kernel) clReleaseKernel(kernel);
     if (program) clReleaseProgram(program);
-    if (command_queue) clReleaseCommandQueue(command_queue);
-    if (context) clReleaseContext(context);
 }
 
 // Instantiate the parameterized test suite with different data sizes
